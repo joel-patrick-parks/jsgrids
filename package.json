@@ -24,7 +24,7 @@
     "react-github-corner": "^2.5.0",
     "react-icons": "^4.3.1",
     "react-tippy": "^1.4.0",
-    "runtypes": "^6.5.0"
+    "yup": "^0.32.11"
   },
   "devDependencies": {
     "@types/autoprefixer": "^10.2.0",

@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "fs"
 import * as yaml from "js-yaml"
 import { basename, join } from "path"
-import * as rt from "runtypes"
+import * as yup from "yup"
 import * as cache from "./cache"
 import { Features } from "./features"
 import { throttledFetch } from "./utils"
@@ -11,81 +11,80 @@ import { throttledFetch } from "./utils"
 // importing data and working with TypeScript a lot easier.
 //
 
-const URL = rt.String.withConstraint(
-  (str) => /^https?:\/\//.test(str) || `${str} is not a valid URL`
-)
-const GitHubRepo = rt.String.withConstraint(
-  (str) => /^\S+\/\S+$/.test(str) || `${str} is not a username/repo pair`
-)
-const Feature = rt.Boolean.Or(URL).Or(rt.String)
-
-const FrameworkValue = rt.Optional(URL.Or(rt.Boolean))
-
-const Frameworks = rt.Record({
-  vanilla: FrameworkValue,
-  react: FrameworkValue,
-  vue: FrameworkValue,
-  angular: FrameworkValue,
-  jquery: FrameworkValue,
-  ember: FrameworkValue,
+const booleanOrUrl = yup.mixed<string | boolean>().when("booleanOrUrl", {
+  is: (val: any) => typeof val === "string",
+  then: yup.string().url(),
+  otherwise: yup.boolean().optional(),
 })
 
-export type FrameworkName = keyof rt.Static<typeof Frameworks>
+const booleanOrString = yup.mixed<string | boolean>().when("booleanOrString", {
+  is: (val: any) => typeof val === "string",
+  then: yup.string(),
+  otherwise: yup.boolean().optional(),
+})
+
+const githubRepoSchema = yup
+  .string()
+  .matches(/^\S+\/\S+$/, "Must be a username/repo pair")
+
+const frameworksSchema = yup.object({
+  vanilla: booleanOrUrl,
+  react: booleanOrUrl,
+  vue: booleanOrUrl,
+  angular: booleanOrUrl,
+  jquery: booleanOrUrl,
+  ember: booleanOrUrl,
+})
+
+export type FrameworkName = keyof yup.Asserts<typeof frameworksSchema>
 
 // Validate and type the data we get from the YAML files in `data`.
-const ImportedYAMLInfo = rt.Record({
-  title: rt.String,
-  description: rt.String,
-  homeUrl: URL.Or(rt.Null),
-  demoUrl: URL.Or(rt.Null),
-  githubRepo: GitHubRepo.Or(rt.Null),
-  npmPackage: rt.String.Or(rt.Null),
-  ignoreBundlephobia: rt.Optional(rt.Boolean),
-  license: rt.String.Or(rt.Null),
-  revenueModel: rt.String.Or(rt.Null),
-  frameworks: Frameworks,
-  features: rt.Dictionary(Feature),
+const yamlSchema = yup.object({
+  title: yup.string().required(),
+  description: yup.string().required(),
+  homeUrl: yup.string().url(),
+  demoUrl: yup.string().url(),
+  githubRepo: githubRepoSchema,
+  npmPackage: yup.string(),
+  ignoreBundlephobia: yup.boolean(),
+  license: yup.string(),
+  revenueModel: yup.string(),
+  frameworks: frameworksSchema,
+  features: yup.object(
+    Object.fromEntries(
+      Object.keys(Features).map((key) => [key, booleanOrString])
+    )
+  ),
 })
 
 // Allow additional information to be added to the library info dictionaries.
-const AugmentedInfo = rt.Record({
-  ...ImportedYAMLInfo.fields,
-  id: rt.String,
-  github: rt.Optional(
-    rt.Record({
-      url: URL,
-      stars: rt.Number,
-      forks: rt.Number,
-      openIssues: rt.Number,
-      watchers: rt.Number,
-      subscribers: rt.Number,
-      network: rt.Number,
-      contributors: rt.Number,
-    })
-  ),
-  npm: rt.Optional(
-    rt.Record({
-      url: URL,
-      downloads: rt.Number,
-    })
-  ),
-  bundlephobia: rt.Optional(
-    rt
-      .Record({
-        url: URL,
-        rawSize: rt.Number,
-        gzipSize: rt.Number,
-      })
-      .Or(rt.Null)
-  ),
-})
+const libraryInfoSchema = yamlSchema.concat(
+  yup.object({
+    id: yup.string().required(),
+    github: yup.object({
+      url: yup.string().url(),
+      stars: yup.number(),
+      forks: yup.number(),
+      openIssues: yup.number(),
+      watchers: yup.number(),
+      subscribers: yup.number(),
+      network: yup.number(),
+      contributors: yup.number(),
+    }),
+    npm: yup.object({
+      url: yup.string().url(),
+      downloads: yup.number(),
+    }),
+    bundlephobia: yup.object({
+      url: yup.string().url(),
+      rawSize: yup.number(),
+      gzipSize: yup.number(),
+    }),
+  })
+)
 
-// Make the final thing we return read-only.
-const LibraryInfo = rt.Record(AugmentedInfo.fields).asReadonly()
-
-type ImportedYAMLInfo = rt.Static<typeof ImportedYAMLInfo>
-type AugmentedInfo = rt.Static<typeof AugmentedInfo>
-export type LibraryInfo = rt.Static<typeof LibraryInfo>
+type ImportedYAMLInfo = yup.Asserts<typeof yamlSchema>
+export type LibraryInfo = yup.Asserts<typeof libraryInfoSchema>
 
 const allowedFeatures = new Set(Object.keys(Features))
 
@@ -97,30 +96,19 @@ export const getLibraries = async (): Promise<LibraryInfo[]> => {
     .filter((name) => /\.yml$/.test(name))
     .map((name) => join(dataDir, name))
 
-  const items: AugmentedInfo[] = []
+  const items: LibraryInfo[] = []
   await Promise.all(
     paths.map(async (path) => {
       const id = basename(path, ".yml")
 
       // Load raw YAML data and make sure it validates.
-      const obj = yaml.load(readFileSync(path, "utf8"))
-      if (typeof obj !== "object") {
-        throw new Error(`Expected ${path} to be an object`)
-      }
-      let item: AugmentedInfo
+      const obj = yaml.load(readFileSync(path, "utf8")) as Object
       try {
-        ImportedYAMLInfo.check(obj)
-        item = AugmentedInfo.check({ id, ...obj })
+        yamlSchema.validateSync(obj) // Asserts the Object type
       } catch (err) {
-        throw new Error(
-          `In ${path}, key "${err.key}" failed validation: ${err.message}`
-        )
+        throw new Error(`${path} is not valid: ${err}`)
       }
-      for (const key in item.features) {
-        if (!allowedFeatures.has(key)) {
-          throw new Error(`In ${path}, unexpected feature "${key}"`)
-        }
-      }
+      let item = libraryInfoSchema.validateSync({ id, ...obj })
 
       // Populate GitHub data if the library has a GitHub repo.
       if (item.githubRepo) {
@@ -156,13 +144,10 @@ export const getLibraries = async (): Promise<LibraryInfo[]> => {
             if (data.length < pageSize || !res1.headers.get("link")) {
               stats = { contributors: data.length }
             } else {
-              const lastPage = Number(
-                res1.headers
-                  .get("link")
-                  .split(",")
-                  .find((s?: string) => /rel="last"/.test(s))
-                  .match(/\bpage=(\d+)/)[1]
-              )
+              const header = res1.headers.get("link")?.split(",") || []
+              const part = header.find((s) => /rel="last"/.test(s)) ?? ""
+              const match = part.match(/\bpage=(\d+)/)
+              const lastPage = Number(match && match[1])
               const res2 = await throttledFetch(`${url}&page=${lastPage}`)
               const data: any = res2.data
               const total = pageSize * (lastPage - 1) + data.length
@@ -226,7 +211,7 @@ export const getLibraries = async (): Promise<LibraryInfo[]> => {
               gzipSize: data.gzip,
             }
             cache.set(key, bundlephobia)
-          } catch (err) {
+          } catch (err: any) {
             // For now, some packages like pqgrid seem to break their build system, so
             // ignore 500 errors.
             throw new Error(
@@ -239,7 +224,7 @@ export const getLibraries = async (): Promise<LibraryInfo[]> => {
         item.bundlephobia = bundlephobia
       }
 
-      items.push(AugmentedInfo.check(item))
+      items.push(libraryInfoSchema.validateSync(item))
     })
   )
 
